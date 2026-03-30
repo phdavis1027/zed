@@ -2885,7 +2885,7 @@ impl Sidebar {
         let thread_count = store_entity
             .read(cx)
             .entries_for_path(&folder_paths)
-            .count() as i64;
+            .count() as u64;
 
         let main_repo = workspaces.iter().find_map(|workspace| {
             let project = workspace.read(cx).project().clone();

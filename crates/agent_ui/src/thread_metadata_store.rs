@@ -178,11 +178,11 @@ impl ThreadMetadata {
 
 pub struct ArchivedGitWorktree {
     pub id: i64,
-    pub worktree_path: PathBuf,
     pub main_repo_path: PathBuf,
+    pub worktree_path: PathBuf,
     pub branch_name: String,
     pub commit_hash: String,
-    pub thread_count: i64,
+    pub thread_count: u64,
     pub restored: bool,
 }
 
@@ -329,7 +329,7 @@ impl SidebarThreadMetadataStore {
         main_repo_path: String,
         branch_name: String,
         commit_hash: String,
-        thread_count: i64,
+        thread_count: u64,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<i64>> {
         let db = self.db.clone();
@@ -358,7 +358,7 @@ impl SidebarThreadMetadataStore {
         &self,
         id: i64,
         cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<i64>> {
+    ) -> Task<anyhow::Result<u64>> {
         let db = self.db.clone();
         cx.background_spawn(async move { db.decrement_thread_count(id).await })
     }
@@ -622,7 +622,7 @@ impl ThreadMetadataDb {
         main_repo_path: &str,
         branch_name: &str,
         commit_hash: &str,
-        thread_count: i64,
+        thread_count: u64,
     ) -> anyhow::Result<i64> {
         let worktree_path = worktree_path.to_string();
         let main_repo_path = main_repo_path.to_string();
@@ -663,7 +663,7 @@ impl ThreadMetadataDb {
         )?(worktree_path)
     }
 
-    pub async fn decrement_thread_count(&self, id: i64) -> anyhow::Result<i64> {
+    pub async fn decrement_thread_count(&self, id: i64) -> anyhow::Result<u64> {
         self.write(move |conn| {
             let mut stmt = Statement::prepare(
                 conn,
@@ -682,6 +682,7 @@ impl ThreadMetadataDb {
             count_stmt
                 .maybe_row::<i64>()?
                 .ok_or_else(|| anyhow::anyhow!("Archived worktree row not found"))
+                .map(|v| v as u64)
         })
         .await
     }
@@ -768,7 +769,7 @@ impl Column for ArchivedGitWorktree {
         let (main_repo_path_str, next): (String, i32) = Column::column(statement, next)?;
         let (branch_name, next): (String, i32) = Column::column(statement, next)?;
         let (commit_hash, next): (String, i32) = Column::column(statement, next)?;
-        let (thread_count, next): (i64, i32) = Column::column(statement, next)?;
+        let (thread_count, next): (u64, i32) = Column::column(statement, next)?;
         let (restored_int, next): (i64, i32) = Column::column(statement, next)?;
         Ok((
             ArchivedGitWorktree {
