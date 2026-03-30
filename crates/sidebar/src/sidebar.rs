@@ -2343,23 +2343,39 @@ impl Sidebar {
             })?;
 
             if let Some(worktree_repo) = worktree_repo {
-                // Reset HEAD~ to undo the WIP commit (mixed reset puts
-                // changes back as unstaged).
+                // Undo the two WIP commits in reverse order:
+                //   1. Mixed reset HEAD~ — undoes "WIP: unstaged changes",
+                //      putting those back as unstaged working-dir changes.
+                //   2. Soft reset HEAD~ — undoes "WIP: staged changes",
+                //      keeping those in the index (staged).
                 let reset_receiver = worktree_repo.update(cx, |repo, cx| {
                     repo.reset("HEAD~".to_string(), ResetMode::Mixed, cx)
                 });
                 match reset_receiver.await {
                     Ok(Ok(())) => {}
                     Ok(Err(err)) => {
-                        log::warn!("Failed to reset WIP commit: {err}");
+                        log::warn!("Failed to reset unstaged WIP commit: {err}");
                     }
                     Err(_) => {
                         log::warn!("Reset was canceled");
                     }
                 }
 
-                // Now resolve the branch name. After the reset, HEAD is at
-                // the parent of the WIP commit.
+                let reset_receiver = worktree_repo.update(cx, |repo, cx| {
+                    repo.reset("HEAD~".to_string(), ResetMode::Soft, cx)
+                });
+                match reset_receiver.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        log::warn!("Failed to reset staged WIP commit: {err}");
+                    }
+                    Err(_) => {
+                        log::warn!("Reset was canceled");
+                    }
+                }
+
+                // Now resolve the branch name. After both resets, HEAD is at
+                // the original commit (parent of both WIP commits).
                 let head_sha_receiver = worktree_repo.update(cx, |repo, _cx| repo.head_sha());
                 let current_head = match head_sha_receiver.await {
                     Ok(Ok(Some(sha))) => Some(sha),
@@ -2970,45 +2986,80 @@ impl Sidebar {
                     }
                 }
             } else {
-                // Stage all files including untracked.
-                let stage_result =
-                    worktree_repo.update(cx, |repo, _cx| repo.stage_all_including_untracked());
-                let stage_ok = match stage_result.await {
+                // Create two WIP commits to preserve staged vs unstaged:
+                //   1. Commit whatever is currently staged
+                //   2. Stage everything else (git add -A), commit that
+                // On restore, two resets undo this in reverse order.
+
+                // First commit: currently-staged changes.
+                let askpass = AskPassDelegate::new(cx, |_, _, _| {});
+                let first_commit = worktree_repo.update(cx, |repo, cx| {
+                    repo.commit(
+                        "WIP: staged changes".into(),
+                        None,
+                        CommitOptions {
+                            allow_empty: true,
+                            ..Default::default()
+                        },
+                        askpass,
+                        cx,
+                    )
+                });
+                let first_ok = match first_commit.await {
                     Ok(Ok(())) => true,
                     Ok(Err(err)) => {
-                        log::error!("Failed to stage worktree files: {err}");
+                        log::error!("Failed to commit staged changes: {err}");
                         false
                     }
                     Err(_) => {
-                        log::error!("Stage operation was canceled");
+                        log::error!("Staged commit was canceled");
                         false
                     }
                 };
 
-                let commit_ok = if stage_ok {
-                    let askpass = AskPassDelegate::new(cx, |_, _, _| {});
-                    let commit_result = worktree_repo.update(cx, |repo, cx| {
-                        repo.commit(
-                            "WIP".into(),
-                            None,
-                            CommitOptions {
-                                allow_empty: true,
-                                ..Default::default()
-                            },
-                            askpass,
-                            cx,
-                        )
-                    });
-                    match commit_result.await {
+                // Second commit: stage remaining (unstaged + untracked), then commit.
+                let commit_ok = if first_ok {
+                    let stage_result =
+                        worktree_repo.update(cx, |repo, _cx| repo.stage_all_including_untracked());
+                    let stage_ok = match stage_result.await {
                         Ok(Ok(())) => true,
                         Ok(Err(err)) => {
-                            log::error!("Failed to create WIP commit: {err}");
+                            log::error!("Failed to stage remaining files: {err}");
                             false
                         }
                         Err(_) => {
-                            log::error!("WIP commit was canceled");
+                            log::error!("Stage operation was canceled");
                             false
                         }
+                    };
+
+                    if stage_ok {
+                        let askpass = AskPassDelegate::new(cx, |_, _, _| {});
+                        let second_commit = worktree_repo.update(cx, |repo, cx| {
+                            repo.commit(
+                                "WIP: unstaged changes".into(),
+                                None,
+                                CommitOptions {
+                                    allow_empty: true,
+                                    ..Default::default()
+                                },
+                                askpass,
+                                cx,
+                            )
+                        });
+                        match second_commit.await {
+                            Ok(Ok(())) => true,
+                            Ok(Err(err)) => {
+                                log::error!("Failed to commit unstaged changes: {err}");
+                                false
+                            }
+                            Err(_) => {
+                                log::error!("Unstaged commit was canceled");
+                                false
+                            }
+                        }
+                    } else {
+                        false
                     }
                 } else {
                     false
