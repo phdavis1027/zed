@@ -15,6 +15,7 @@ use chrono::Utc;
 use editor::Editor;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagViewExt as _};
 use git::repository::{AskPassDelegate, CommitOptions, ResetMode};
+use git::status::FileStatus;
 use gpui::{
     Action as _, AnyElement, App, AsyncWindowContext, Context, Entity, FocusHandle, Focusable,
     KeyContext, ListState, Pixels, PromptLevel, Render, SharedString, WeakEntity, Window,
@@ -2899,6 +2900,16 @@ impl Sidebar {
                 })
         });
 
+        // Collect paths of uncommitted files so we can check total size
+        // before creating a WIP commit.
+        let uncommitted_paths: Vec<std::path::PathBuf> = worktree_repo
+            .read(cx)
+            .snapshot()
+            .status()
+            .filter(|entry| !matches!(entry.status, FileStatus::Ignored))
+            .map(|entry| worktree_path.join(entry.repo_path.as_std_path()))
+            .collect();
+
         let fs = <dyn fs::Fs>::global(cx);
         let worktree_path_str = worktree_path.to_string_lossy().to_string();
         let main_repo_path_str = main_repo_path.to_string_lossy().to_string();
@@ -2909,70 +2920,36 @@ impl Sidebar {
 
             // === Last thread: WIP commit, ref creation, and worktree deletion ===
 
-            // Stage all files including untracked.
-            let stage_result =
-                worktree_repo.update(cx, |repo, _cx| repo.stage_all_including_untracked());
-            let stage_ok = match stage_result.await {
-                Ok(Ok(())) => true,
-                Ok(Err(err)) => {
-                    log::error!("Failed to stage worktree files: {err}");
-                    false
-                }
-                Err(_) => {
-                    log::error!("Stage operation was canceled");
-                    false
-                }
-            };
-
-            let commit_ok = if stage_ok {
-                let askpass = AskPassDelegate::new(cx, |_, _, _| {});
-                let commit_result = worktree_repo.update(cx, |repo, cx| {
-                    repo.commit(
-                        "WIP".into(),
-                        None,
-                        CommitOptions {
-                            allow_empty: true,
-                            ..Default::default()
-                        },
-                        askpass,
-                        cx,
-                    )
-                });
-                match commit_result.await {
-                    Ok(Ok(())) => true,
-                    Ok(Err(err)) => {
-                        log::error!("Failed to create WIP commit: {err}");
-                        false
-                    }
-                    Err(_) => {
-                        log::error!("WIP commit was canceled");
-                        false
+            // Check if uncommitted content is too large for a WIP commit.
+            const MAX_WIP_COMMIT_SIZE: u64 = 5 * 1024 * 1024;
+            let mut uncommitted_size: u64 = 0;
+            for path in &uncommitted_paths {
+                if let Ok(Some(metadata)) = fs.metadata(path).await {
+                    if !metadata.is_dir {
+                        uncommitted_size += metadata.len;
+                        if uncommitted_size >= MAX_WIP_COMMIT_SIZE {
+                            break;
+                        }
                     }
                 }
-            } else {
-                false
-            };
+            }
 
-            if !commit_ok {
-                // Show a prompt asking the user what to do.
+            if uncommitted_size >= MAX_WIP_COMMIT_SIZE {
                 let answer = cx.prompt(
                     PromptLevel::Warning,
-                    "Failed to save worktree state",
+                    "Uncommitted changes too large to save",
                     Some(
-                        "Could not create a WIP commit for this worktree. \
-                         If you proceed, the worktree will be deleted and \
-                         unarchiving this thread later will not restore the \
-                         filesystem to its previous state.\n\n\
-                         Cancel to keep the worktree on disk so you can \
-                         resolve the issue manually.",
+                        "The uncommitted files in this worktree total 5 MB or more. \
+                         To preserve these changes, make a git commit before archiving.\n\n\
+                         Would you like to delete the worktree without saving?",
                     ),
-                    &["Delete Anyway", "Cancel"],
+                    &["Delete", "Cancel"],
                 );
 
                 match answer.await {
                     Ok(0) => {
-                        // "Delete Anyway" — create record without commit hash so
-                        // unarchiving knows the worktree was deleted.
+                        // "Delete" — create record without commit hash,
+                        // then skip to worktree deletion.
                         store
                             .update(cx, |store, cx| {
                                 store.create_archived_worktree(
@@ -2997,46 +2974,135 @@ impl Sidebar {
                     }
                 }
             } else {
-                // Commit succeeded — get hash, create archived worktree row, create ref.
-                let head_sha_result = worktree_repo.update(cx, |repo, _cx| repo.head_sha());
-                let commit_hash = match head_sha_result.await {
-                    Ok(Ok(Some(sha))) => sha,
-                    Ok(Ok(None)) => {
-                        log::error!("HEAD SHA is None after WIP commit");
-                        return anyhow::Ok(());
-                    }
+                // Stage all files including untracked.
+                let stage_result =
+                    worktree_repo.update(cx, |repo, _cx| repo.stage_all_including_untracked());
+                let stage_ok = match stage_result.await {
+                    Ok(Ok(())) => true,
                     Ok(Err(err)) => {
-                        log::error!("Failed to get HEAD SHA: {err}");
-                        return anyhow::Ok(());
+                        log::error!("Failed to stage worktree files: {err}");
+                        false
                     }
                     Err(_) => {
-                        log::error!("HEAD SHA operation was canceled");
-                        return anyhow::Ok(());
+                        log::error!("Stage operation was canceled");
+                        false
                     }
                 };
 
-                let row_id = store
-                    .update(cx, |store, cx| {
-                        store.create_archived_worktree(
-                            worktree_path_str,
-                            main_repo_path_str,
-                            branch_name_clone,
-                            commit_hash.clone(),
-                            thread_count,
+                let commit_ok = if stage_ok {
+                    let askpass = AskPassDelegate::new(cx, |_, _, _| {});
+                    let commit_result = worktree_repo.update(cx, |repo, cx| {
+                        repo.commit(
+                            "WIP".into(),
+                            None,
+                            CommitOptions {
+                                allow_empty: true,
+                                ..Default::default()
+                            },
+                            askpass,
                             cx,
                         )
-                    })
-                    .await?;
+                    });
+                    match commit_result.await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(err)) => {
+                            log::error!("Failed to create WIP commit: {err}");
+                            false
+                        }
+                        Err(_) => {
+                            log::error!("WIP commit was canceled");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
 
-                // Create a git ref on the main repo.
-                if let Some(main_repo) = &main_repo {
-                    let ref_name = format!("refs/archived-worktrees/{row_id}");
-                    let ref_result =
-                        main_repo.update(cx, |repo, _cx| repo.update_ref(ref_name, commit_hash));
-                    match ref_result.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(err)) => log::error!("Failed to create ref: {err}"),
-                        Err(_) => log::error!("Ref creation was canceled"),
+                if !commit_ok {
+                    // Show a prompt asking the user what to do.
+                    let answer = cx.prompt(
+                        PromptLevel::Warning,
+                        "Failed to save worktree state",
+                        Some(
+                            "Could not create a WIP commit for this worktree. \
+                             If you proceed, the worktree will be deleted and \
+                             unarchiving this thread later will not restore the \
+                             filesystem to its previous state.\n\n\
+                             Cancel to keep the worktree on disk so you can \
+                             resolve the issue manually.",
+                        ),
+                        &["Delete Anyway", "Cancel"],
+                    );
+
+                    match answer.await {
+                        Ok(0) => {
+                            // "Delete Anyway" — create record without commit hash so
+                            // unarchiving knows the worktree was deleted.
+                            store
+                                .update(cx, |store, cx| {
+                                    store.create_archived_worktree(
+                                        worktree_path_str.clone(),
+                                        main_repo_path_str.clone(),
+                                        branch_name_clone.clone(),
+                                        String::new(),
+                                        thread_count,
+                                        cx,
+                                    )
+                                })
+                                .await?;
+                        }
+                        _ => {
+                            // "Cancel" — undo the archive.
+                            if let Some(metadata) = thread_metadata {
+                                store.update(cx, |store, cx| {
+                                    store.save(metadata, cx);
+                                });
+                            }
+                            return anyhow::Ok(());
+                        }
+                    }
+                } else {
+                    // Commit succeeded — get hash, create archived worktree row, create ref.
+                    let head_sha_result = worktree_repo.update(cx, |repo, _cx| repo.head_sha());
+                    let commit_hash = match head_sha_result.await {
+                        Ok(Ok(Some(sha))) => sha,
+                        Ok(Ok(None)) => {
+                            log::error!("HEAD SHA is None after WIP commit");
+                            return anyhow::Ok(());
+                        }
+                        Ok(Err(err)) => {
+                            log::error!("Failed to get HEAD SHA: {err}");
+                            return anyhow::Ok(());
+                        }
+                        Err(_) => {
+                            log::error!("HEAD SHA operation was canceled");
+                            return anyhow::Ok(());
+                        }
+                    };
+
+                    let row_id = store
+                        .update(cx, |store, cx| {
+                            store.create_archived_worktree(
+                                worktree_path_str,
+                                main_repo_path_str,
+                                branch_name_clone,
+                                commit_hash.clone(),
+                                thread_count,
+                                cx,
+                            )
+                        })
+                        .await?;
+
+                    // Create a git ref on the main repo.
+                    if let Some(main_repo) = &main_repo {
+                        let ref_name = format!("refs/archived-worktrees/{row_id}");
+                        let ref_result = main_repo
+                            .update(cx, |repo, _cx| repo.update_ref(ref_name, commit_hash));
+                        match ref_result.await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => log::error!("Failed to create ref: {err}"),
+                            Err(_) => log::error!("Ref creation was canceled"),
+                        }
                     }
                 }
             }
