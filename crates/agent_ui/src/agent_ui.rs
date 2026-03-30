@@ -237,7 +237,7 @@ pub struct NewNativeAgentThreadFromSummary {
 #[serde(rename_all = "snake_case")]
 pub enum Agent {
     #[default]
-    #[serde(alias = "NativeAgent")]
+    #[serde(alias = "NativeAgent", alias = "TextThread")]
     NativeAgent,
     #[serde(alias = "Custom")]
     Custom {

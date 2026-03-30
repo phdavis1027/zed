@@ -5200,6 +5200,12 @@ mod tests {
             },
         );
 
+        // Legacy TextThread variant deserializes to NativeAgent
+        assert_eq!(
+            serde_json::from_str::<Agent>(r#""TextThread""#).unwrap(),
+            Agent::NativeAgent,
+        );
+
         // snake_case (canonical format)
         assert_eq!(
             serde_json::from_str::<Agent>(r#""native_agent""#).unwrap(),
