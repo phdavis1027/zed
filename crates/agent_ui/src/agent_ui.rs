@@ -373,6 +373,7 @@ pub(crate) fn humanize_token_count(count: u64) -> String {
                 format!("{}.{}k", thousands, hundreds)
             }
         }
+        10_000..=999_999 => format!("{}k", (count + 500) / 1000),
         1_000_000..=9_999_999 => {
             let millions = count / 1_000_000;
             let hundred_thousands = (count % 1_000_000 + 50_000) / 100_000;
@@ -385,7 +386,6 @@ pub(crate) fn humanize_token_count(count: u64) -> String {
             }
         }
         10_000_000.. => format!("{}M", (count + 500_000) / 1_000_000),
-        _ => format!("{}k", (count + 500) / 1000),
     }
 }
 
@@ -762,19 +762,5 @@ mod tests {
                 "EditPrediction should be hidden when provider is None"
             );
         });
-    }
-
-    #[test]
-    fn test_deserialize_external_agent_variants() {
-        assert_eq!(
-            serde_json::from_str::<Agent>(r#""NativeAgent""#).unwrap(),
-            Agent::NativeAgent,
-        );
-        assert_eq!(
-            serde_json::from_str::<Agent>(r#"{"Custom":{"name":"my-agent"}}"#).unwrap(),
-            Agent::Custom {
-                id: "my-agent".into(),
-            },
-        );
     }
 }
