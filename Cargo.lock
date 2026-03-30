@@ -9337,7 +9337,6 @@ dependencies = [
  "open_ai",
  "open_router",
  "parking_lot",
- "proto",
  "schemars",
  "serde",
  "serde_json",
