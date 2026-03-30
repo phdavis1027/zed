@@ -2276,7 +2276,11 @@ impl Sidebar {
         } else {
             // Collision — use a different path. Generate a name based on
             // the archived worktree ID to keep it deterministic.
-            let new_name = format!("{}-restored-{}", row.branch_name, row.id);
+            let new_name = format!(
+                "{}-restored-{}",
+                row.branch_name.as_deref().unwrap_or("worktree"),
+                row.id
+            );
             let path = main_repo.update(cx, |repo, _cx| {
                 let setting = git_store::worktrees_directory_for_repo(
                     &repo.snapshot().original_repo_abs_path,
@@ -2362,46 +2366,42 @@ impl Sidebar {
                     _ => None,
                 };
 
-                // Try to put the worktree on the original branch name.
-                let original_branch = &row.branch_name;
-                let branches_receiver = main_repo.update(cx, |repo, _cx| repo.branches());
-                let branches = match branches_receiver.await {
-                    Ok(Ok(branches)) => branches,
-                    _ => Vec::new(),
-                };
+                if let Some(original_branch) = &row.branch_name {
+                    // Try to put the worktree on the original branch name.
+                    let branches_receiver = main_repo.update(cx, |repo, _cx| repo.branches());
+                    let branches = match branches_receiver.await {
+                        Ok(Ok(branches)) => branches,
+                        _ => Vec::new(),
+                    };
 
-                let existing_branch = branches
-                    .iter()
-                    .find(|b| b.name() == original_branch && !b.is_remote());
+                    let existing_branch = branches
+                        .iter()
+                        .find(|b| b.name() == original_branch && !b.is_remote());
 
-                let branch_exists_and_is_ours = existing_branch.is_some()
-                    && current_head.as_ref().is_some_and(|head| {
-                        existing_branch
-                            .and_then(|b| b.most_recent_commit.as_ref())
-                            .is_some_and(|commit| commit.sha.as_ref() == head.as_str())
-                    });
+                    let branch_exists_and_is_ours = existing_branch.is_some()
+                        && current_head.as_ref().is_some_and(|head| {
+                            existing_branch
+                                .and_then(|b| b.most_recent_commit.as_ref())
+                                .is_some_and(|commit| commit.sha.as_ref() == head.as_str())
+                        });
 
-                let branch_exists = existing_branch.is_some();
+                    let branch_exists = existing_branch.is_some();
 
-                if branch_exists_and_is_ours {
-                    // Branch exists and points to the right commit — switch to it.
-                    let receiver = worktree_repo
-                        .update(cx, |repo, _cx| repo.change_branch(original_branch.clone()));
-                    if let Ok(result) = receiver.await {
-                        result.log_err();
-                    }
-                } else if !branch_exists {
-                    // Branch doesn't exist — create it at current HEAD.
-                    let receiver = worktree_repo.update(cx, |repo, _cx| {
-                        repo.create_branch(original_branch.clone(), None)
-                    });
-                    if let Ok(result) = receiver.await {
-                        result.log_err();
+                    if branch_exists_and_is_ours {
+                        let receiver = worktree_repo
+                            .update(cx, |repo, _cx| repo.change_branch(original_branch.clone()));
+                        if let Ok(result) = receiver.await {
+                            result.log_err();
+                        }
+                    } else if !branch_exists {
+                        let receiver = worktree_repo.update(cx, |repo, _cx| {
+                            repo.create_branch(original_branch.clone(), None)
+                        });
+                        if let Ok(result) = receiver.await {
+                            result.log_err();
+                        }
                     }
                 }
-                // If branch exists but points elsewhere (collision), leave
-                // the worktree in detached HEAD. The user can create a
-                // branch manually.
             }
 
             // Mark the archived worktree as restored in the database.
@@ -2854,11 +2854,7 @@ impl Sidebar {
                     if snapshot.is_linked_worktree()
                         && *snapshot.work_directory_abs_path == *worktree_path
                     {
-                        let branch_name = snapshot
-                            .branch
-                            .as_ref()
-                            .map(|b| b.name().to_string())
-                            .unwrap_or_default();
+                        let branch_name = snapshot.branch.as_ref().map(|b| b.name().to_string());
                         let main_repo_path = snapshot.original_repo_abs_path.clone();
                         Some((repo_entity.clone(), branch_name, main_repo_path))
                     } else {

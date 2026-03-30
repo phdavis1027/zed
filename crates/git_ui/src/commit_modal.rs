@@ -453,7 +453,7 @@ impl CommitModal {
                                     CommitOptions {
                                         amend: is_amend_pending,
                                         signoff: is_signoff_enabled,
-                                        ..Default::default()
+                                        allow_empty: false,
                                     },
                                     window,
                                     cx,

@@ -180,7 +180,7 @@ pub struct ArchivedGitWorktree {
     pub id: i64,
     pub main_repo_path: PathBuf,
     pub worktree_path: PathBuf,
-    pub branch_name: String,
+    pub branch_name: Option<String>,
     pub commit_hash: String,
     pub thread_count: u64,
     pub restored: bool,
@@ -327,7 +327,7 @@ impl SidebarThreadMetadataStore {
         &self,
         worktree_path: String,
         main_repo_path: String,
-        branch_name: String,
+        branch_name: Option<String>,
         commit_hash: String,
         thread_count: u64,
         cx: &mut Context<Self>,
@@ -337,7 +337,7 @@ impl SidebarThreadMetadataStore {
             db.create_archived_worktree(
                 &worktree_path,
                 &main_repo_path,
-                &branch_name,
+                branch_name.as_deref(),
                 &commit_hash,
                 thread_count,
             )
@@ -376,12 +376,12 @@ impl SidebarThreadMetadataStore {
         &self,
         id: i64,
         worktree_path: String,
-        branch_name: String,
+        branch_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let db = self.db.clone();
         cx.background_spawn(async move {
-            db.update_archived_worktree_restored(id, &worktree_path, &branch_name)
+            db.update_archived_worktree_restored(id, &worktree_path, branch_name.as_deref())
                 .await
         })
     }
@@ -548,6 +548,21 @@ impl Domain for ThreadMetadataDb {
             ALTER TABLE archived_git_worktrees ADD COLUMN thread_count INTEGER NOT NULL DEFAULT 0;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_archived_worktrees_path ON archived_git_worktrees(worktree_path);
         ),
+        sql!(
+            CREATE TABLE IF NOT EXISTS archived_git_worktrees_new(
+                id INTEGER PRIMARY KEY,
+                worktree_path TEXT NOT NULL,
+                main_repo_path TEXT NOT NULL,
+                branch_name TEXT,
+                commit_hash TEXT NOT NULL,
+                thread_count INTEGER NOT NULL DEFAULT 0,
+                restored INTEGER NOT NULL DEFAULT 0
+            ) STRICT;
+            INSERT INTO archived_git_worktrees_new SELECT id, worktree_path, main_repo_path, branch_name, commit_hash, thread_count, restored FROM archived_git_worktrees;
+            DROP TABLE archived_git_worktrees;
+            ALTER TABLE archived_git_worktrees_new RENAME TO archived_git_worktrees;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_archived_worktrees_path ON archived_git_worktrees(worktree_path);
+        ),
     ];
 }
 
@@ -620,13 +635,13 @@ impl ThreadMetadataDb {
         &self,
         worktree_path: &str,
         main_repo_path: &str,
-        branch_name: &str,
+        branch_name: Option<&str>,
         commit_hash: &str,
         thread_count: u64,
     ) -> anyhow::Result<i64> {
         let worktree_path = worktree_path.to_string();
         let main_repo_path = main_repo_path.to_string();
-        let branch_name = branch_name.to_string();
+        let branch_name = branch_name.map(|s| s.to_string());
         let commit_hash = commit_hash.to_string();
         self.write(move |conn| {
             let mut stmt = Statement::prepare(
@@ -701,10 +716,10 @@ impl ThreadMetadataDb {
         &self,
         id: i64,
         worktree_path: &str,
-        branch_name: &str,
+        branch_name: Option<&str>,
     ) -> anyhow::Result<()> {
         let worktree_path = worktree_path.to_string();
-        let branch_name = branch_name.to_string();
+        let branch_name = branch_name.map(|s| s.to_string());
         self.write(move |conn| {
             let mut stmt = Statement::prepare(
                 conn,
@@ -767,7 +782,7 @@ impl Column for ArchivedGitWorktree {
         let (id, next): (i64, i32) = Column::column(statement, start_index)?;
         let (worktree_path_str, next): (String, i32) = Column::column(statement, next)?;
         let (main_repo_path_str, next): (String, i32) = Column::column(statement, next)?;
-        let (branch_name, next): (String, i32) = Column::column(statement, next)?;
+        let (branch_name, next): (Option<String>, i32) = Column::column(statement, next)?;
         let (commit_hash, next): (String, i32) = Column::column(statement, next)?;
         let (thread_count, next): (u64, i32) = Column::column(statement, next)?;
         let (restored_int, next): (i64, i32) = Column::column(statement, next)?;

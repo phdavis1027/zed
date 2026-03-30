@@ -2155,7 +2155,7 @@ impl GitPanel {
                 CommitOptions {
                     amend: false,
                     signoff: self.signoff_enabled,
-                    ..Default::default()
+                    allow_empty: false,
                 },
                 window,
                 cx,
@@ -2196,7 +2196,7 @@ impl GitPanel {
                         CommitOptions {
                             amend: true,
                             signoff: self.signoff_enabled,
-                            ..Default::default()
+                            allow_empty: false,
                         },
                         window,
                         cx,
@@ -4459,7 +4459,7 @@ impl GitPanel {
                                     CommitOptions {
                                         amend,
                                         signoff,
-                                        ..Default::default()
+                                        allow_empty: false,
                                     },
                                     window,
                                     cx,
