@@ -341,7 +341,17 @@ impl ToolCall {
         }
 
         if let Some(status) = status {
-            self.status = status.into();
+            let new_status: ToolCallStatus = status.into();
+            if matches!(
+                (&self.status, &new_status),
+                (ToolCallStatus::WaitingForConfirmation { .. }, ToolCallStatus::Pending)
+            ) {
+                log::warn!(
+                    "update_fields: skipping status downgrade from WaitingForConfirmation to Pending for tool_call {:?}",
+                    self.id,
+                );
+            }
+            self.status = new_status;
         }
 
         if let Some(subagent_session_info) = subagent_session_info_from_meta(&meta) {
@@ -382,6 +392,7 @@ impl ToolCall {
                 }
             }
             for new in content {
+                let is_terminal = matches!(&new, acp::ToolCallContent::Terminal(_));
                 if let Some(new) = ToolCallContent::from_acp(
                     new,
                     language_registry.clone(),
@@ -391,6 +402,13 @@ impl ToolCall {
                 )? {
                     self.content.push(new);
                 } else {
+                    if is_terminal {
+                        log::warn!(
+                            "update_fields: terminal content dropped for tool_call {:?} ({} terminals registered)",
+                            self.id,
+                            terminals.len(),
+                        );
+                    }
                     new_content_len -= 1;
                 }
             }
@@ -814,7 +832,14 @@ impl ToolCallContent {
                 .get(&terminal_id)
                 .cloned()
                 .map(|terminal| Some(Self::Terminal(terminal)))
-                .ok_or_else(|| anyhow::anyhow!("Terminal with id `{}` not found", terminal_id)),
+                .ok_or_else(|| {
+                    log::warn!(
+                        "ToolCallContent::from_acp: terminal {:?} not found ({} registered)",
+                        terminal_id,
+                        terminals.len(),
+                    );
+                    anyhow::anyhow!("Terminal with id `{}` not found", terminal_id)
+                }),
             _ => Ok(None),
         }
     }
@@ -1874,6 +1899,11 @@ impl AcpThread {
         }
 
         if let Some(ix) = self.index_for_tool_call(&id) {
+            log::info!(
+                "upsert_tool_call_inner: UPDATE path for {:?} ({} terminals registered)",
+                id,
+                self.terminals.len(),
+            );
             let AgentThreadEntry::ToolCall(call) = &mut self.entries[ix] else {
                 unreachable!()
             };
@@ -1886,10 +1916,24 @@ impl AcpThread {
                 &self.terminals,
                 cx,
             )?;
+            if matches!(
+                (&call.status, &status),
+                (ToolCallStatus::WaitingForConfirmation { .. }, ToolCallStatus::Pending)
+            ) {
+                log::warn!(
+                    "upsert_tool_call_inner: skipping status downgrade from WaitingForConfirmation to Pending for tool_call {:?}",
+                    id,
+                );
+            }
             call.status = status;
 
             cx.emit(AcpThreadEvent::EntryUpdated(ix));
         } else {
+            log::info!(
+                "upsert_tool_call_inner: CREATE path for {:?} ({} terminals registered)",
+                id,
+                self.terminals.len(),
+            );
             let call = ToolCall::from_acp(
                 update.try_into()?,
                 status,
@@ -2861,6 +2905,11 @@ impl AcpThread {
             )
         });
         self.terminals.insert(terminal_id.clone(), entity.clone());
+        log::info!(
+            "register_terminal_created: terminal {:?} registered ({} total)",
+            terminal_id,
+            self.terminals.len(),
+        );
         entity
     }
 
